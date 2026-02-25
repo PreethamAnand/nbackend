@@ -6,6 +6,8 @@ const multer = require("multer");
 const mongoose = require("mongoose");
 const dotenv = require("dotenv");
 const { v4: uuidv4 } = require("uuid");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
 dotenv.config();
 
@@ -143,6 +145,17 @@ const CompanionApplication = mongoose.model(
   companionApplicationSchema,
 );
 
+const userSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true, lowercase: true },
+    password: { type: String, required: true },
+  },
+  { timestamps: true },
+);
+
+const User = mongoose.model("User", userSchema);
+
 async function seedMongo() {
   const meditationCount = await Meditation.countDocuments();
   if (meditationCount === 0) {
@@ -212,7 +225,10 @@ async function seedMongo() {
 }
 const app = express();
 app.set("trust proxy", 1);
-const allowedOrigins = ["http://localhost:3000", "https://nfrontend-five.vercel.app"];
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://nfrontend-five.vercel.app",
+];
 
 app.use(
   cors({
@@ -260,8 +276,6 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
       .json({ error: "File upload failed", message: error.message });
   }
 });
-
-
 
 function splitList(value) {
   if (Array.isArray(value)) return value;
@@ -780,6 +794,123 @@ app.delete("/api/sounds/:id", async (req, res) => {
     return res.status(404).json({ error: "sound not found" });
   }
   res.json({ ok: true });
+});
+
+// ============================================
+// Authentication Routes
+// ============================================
+
+// POST /api/auth/register
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    // Validate required fields
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide name, email, and password",
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "User already exists with this email",
+      });
+    }
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // Create new user
+    const user = await User.create({
+      name,
+      email: email.toLowerCase(),
+      password: hashedPassword,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "User registered successfully",
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error during registration",
+    });
+  }
+});
+
+// POST /api/auth/login
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validate required fields
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide email and password",
+      });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid credentials",
+      });
+    }
+
+    // Compare password
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid credentials",
+      });
+    }
+
+    // Generate JWT token
+    const jwtSecret =
+      process.env.JWT_SECRET || "fallback-secret-change-in-production";
+    const token = jwt.sign(
+      {
+        userId: user._id,
+        email: user.email,
+      },
+      jwtSecret,
+      { expiresIn: "1d" },
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error during login",
+    });
+  }
 });
 
 async function startServer() {
