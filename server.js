@@ -58,8 +58,9 @@ const upload = multer({
 });
 
 if (!MONGO_URI) {
-  console.error("Missing MONGO_URI in environment.");
-  process.exit(1);
+  console.error("WARNING: MONGO_URI missing");
+} else {
+  console.log("MONGO_URI detected");
 }
 
 async function connectMongo() {
