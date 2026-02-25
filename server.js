@@ -209,8 +209,8 @@ async function seedMongo() {
     ]);
   }
 }
-
 const app = express();
+app.set("trust proxy", 1);
 const allowedOrigins = ["http://localhost:3000", "https://nfr-mu.vercel.app"];
 
 app.use(
@@ -228,8 +228,16 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "2mb" }));
-
 app.use("/uploads", express.static(UPLOADS_DIR));
+// Root route
+app.get("/", (req, res) => {
+  res.json({ message: "Nirvaha backend is running 🚀" });
+});
+
+// Health route
+app.get("/health", (req, res) => {
+  res.json({ status: "OK" });
+});
 
 app.post("/api/upload", upload.single("file"), (req, res) => {
   try {
@@ -237,7 +245,7 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const fileUrl = `/uploads/${req.file.filename}`;
+    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
     res.json({
       success: true,
       url: fileUrl,
@@ -252,6 +260,10 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
       .status(500)
       .json({ error: "File upload failed", message: error.message });
   }
+});
+
+app.get("/", (req, res) => {
+  res.json({ message: "Nirvaha backend is running 🚀" });
 });
 
 app.get("/health", (req, res) => {
