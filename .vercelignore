@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+
+# Environment files (use Vercel dashboard for env vars)
+.env
+.env.local
+.env.*.local
+
+# Local development database
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploads folder (use cloud storage in production)
+uploads/
+
+# Scripts (if not needed in production)
+scripts/
+
+# Documentation
+ADMIN_CREDENTIALS.md
+*.md
+!README.md
+
+# IDE and system files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Testing
+__tests__/
+*.test.js
+*.spec.js
+coverage/
+
+# Misc
+temp/
+tmp/
+logs/
+*.log
