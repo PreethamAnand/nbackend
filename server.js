@@ -229,12 +229,10 @@ app.use(
 );
 app.use(express.json({ limit: "2mb" }));
 app.use("/uploads", express.static(UPLOADS_DIR));
-// Root route
 app.get("/", (req, res) => {
   res.json({ message: "Nirvaha backend is running 🚀" });
 });
 
-// Health route
 app.get("/health", (req, res) => {
   res.json({ status: "OK" });
 });
@@ -262,13 +260,7 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
   }
 });
 
-app.get("/", (req, res) => {
-  res.json({ message: "Nirvaha backend is running 🚀" });
-});
 
-app.get("/health", (req, res) => {
-  res.json({ status: "OK" });
-});
 
 function splitList(value) {
   if (Array.isArray(value)) return value;
