@@ -212,7 +212,7 @@ async function seedMongo() {
 }
 const app = express();
 app.set("trust proxy", 1);
-const allowedOrigins = ["http://localhost:3000", "https://nfrontend-five.vercel.app/"];
+const allowedOrigins = ["http://localhost:3000", "https://nfrontend-five.vercel.app"];
 
 app.use(
   cors({
