@@ -6,13 +6,53 @@ const multer = require("multer");
 const mongoose = require("mongoose");
 const dotenv = require("dotenv");
 const { v4: uuidv4 } = require("uuid");
+const http = require("http");
+const { Server } = require("socket.io");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 dotenv.config();
 
+const app = express();
+const server = http.createServer(app);
+
+// Dynamic CORS configuration to support development and production Vercel deployments
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (mobile apps, curl requests)
+    if (!origin) return callback(null, true);
+
+    // Allow localhost URLs (development)
+    if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
+      return callback(null, true);
+    }
+
+    // Allow all Vercel deployments (vercel.app domain)
+    if (origin.includes("vercel.app")) {
+      return callback(null, true);
+    }
+
+    // Deny all other origins
+    return callback(new Error("Not allowed by CORS"));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+  ],
+  exposedHeaders: ["Content-Range", "X-Content-Range"],
+  credentials: true,
+  maxAge: 86400, // 24 hours
+};
+
+const io = new Server(server, {
+  cors: corsOptions,
+});
+
 const PORT = process.env.PORT || 5000;
-const MONGO_URI = process.env.MONGODB_URI;
+const MONGODB_URI = process.env.MONGODB_URI;
 
 const UPLOADS_DIR = path.join(__dirname, "uploads");
 
@@ -59,21 +99,69 @@ const upload = multer({
   },
 });
 
-if (!MONGO_URI) {
-  console.error("WARNING: MONGO_URI missing");
-} else {
-  console.log("MONGO_URI detected");
+const USE_LOCAL_DB = process.env.USE_LOCAL_DB === "true" || !MONGODB_URI;
+let mongoConnected = false;
+
+// In-memory database for development (when MongoDB is unavailable)
+const localDB = {
+  users: [],
+  meditations: [],
+  sounds: [],
+  marketplaceRequests: [],
+  marketplaceItems: [],
+};
+
+// Initialize local admin user for development
+async function initLocalAdminUser() {
+  const adminEmail = "admin@nirvaha.com";
+  const adminExists = localDB.users.find((u) => u.email === adminEmail);
+
+  if (!adminExists) {
+    const adminPassword = "N1rv@h@Adm!n#2025@Secure";
+    const hashedPassword = await bcrypt.hash(adminPassword, 12);
+
+    localDB.users.push({
+      id: uuidv4(),
+      name: "Nirvaha Administrator",
+      email: adminEmail,
+      password: hashedPassword,
+      role: "admin",
+      profile: {
+        mobile: "+1-ADMIN-001",
+        age: "",
+        gender: "Not Specified",
+        address: "Nirvaha Headquarters",
+        education: "Administrator",
+        healthCondition: "Not Applicable",
+      },
+    });
+
+    console.log("✓ Local admin user initialized for development");
+  }
 }
 
 async function connectMongo() {
+  if (!MONGODB_URI) {
+    console.warn(
+      "⚠️  MONGODB_URI not set. Using local JSON database for development.",
+    );
+    console.warn(
+      "⚠️  To use MongoDB, add your IP (106.214.2.149) to MongoDB Atlas IP whitelist.",
+    );
+    mongoConnected = false;
+    return;
+  }
+
   try {
-    await mongoose.connect(MONGO_URI, {
+    await mongoose.connect(MONGODB_URI, {
       autoIndex: true,
     });
-    console.log("Connected to MongoDB Atlas");
+    console.log("✓ Connected to MongoDB Atlas");
+    mongoConnected = true;
   } catch (error) {
-    console.error("MongoDB connection error:", error);
-    process.exit(1);
+    console.error("MongoDB connection error:", error.message);
+    console.warn("⚠️  Falling back to local JSON database for development...");
+    mongoConnected = false;
   }
 }
 
@@ -145,11 +233,88 @@ const CompanionApplication = mongoose.model(
   companionApplicationSchema,
 );
 
+// Content Management Schema
+const contentSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true, unique: true, index: true },
+    type: {
+      type: String,
+      enum: ["text", "image", "html", "json", "number"],
+      default: "text",
+    },
+    value: { type: mongoose.Schema.Types.Mixed, required: true },
+    section: { type: String, required: true, index: true },
+    description: { type: String },
+  },
+  { timestamps: true },
+);
+
+const Content = mongoose.model("Content", contentSchema);
+
+// Marketplace Request Schema
+const marketplaceRequestSchema = new mongoose.Schema(
+  {
+    id: { type: String, default: uuidv4, unique: true, index: true },
+    type: {
+      type: String,
+      enum: ["session", "retreat", "product"],
+      required: true,
+    },
+    status: { type: String, enum: ["pending", "approved"], default: "pending" },
+    userId: { type: String, default: "" },
+    data: { type: mongoose.Schema.Types.Mixed, required: true },
+    approvedAt: { type: Date, default: null },
+    approvedBy: { type: String, default: null },
+  },
+  { timestamps: true },
+);
+
+const MarketplaceRequest = mongoose.model(
+  "MarketplaceRequest",
+  marketplaceRequestSchema,
+);
+
+// Marketplace Item Schema (approved items shown in user marketplace)
+const marketplaceItemSchema = new mongoose.Schema(
+  {
+    id: { type: String, default: uuidv4, unique: true, index: true },
+    requestId: { type: String, required: true, index: true },
+    type: {
+      type: String,
+      enum: ["session", "retreat", "product"],
+      required: true,
+    },
+    status: { type: String, enum: ["active", "completed"], default: "active" },
+    data: { type: mongoose.Schema.Types.Mixed, required: true },
+    approvedAt: { type: Date, default: null },
+    approvedBy: { type: String, default: null },
+    completedAt: { type: Date, default: null },
+    completedBy: { type: String, default: null },
+  },
+  { timestamps: true },
+);
+
+const MarketplaceItem = mongoose.model(
+  "MarketplaceItem",
+  marketplaceItemSchema,
+);
+
+// User Schema for Authentication
 const userSchema = new mongoose.Schema(
   {
+    id: { type: String, default: uuidv4, unique: true, index: true },
     name: { type: String, required: true },
-    email: { type: String, required: true, unique: true, lowercase: true },
+    email: { type: String, required: true, unique: true, index: true },
     password: { type: String, required: true },
+    role: { type: String, enum: ["user", "admin"], default: "user" },
+    profile: {
+      mobile: { type: String, default: "" },
+      age: { type: String, default: "" },
+      gender: { type: String, default: "" },
+      address: { type: String, default: "" },
+      education: { type: String, default: "" },
+      healthCondition: { type: String, default: "" },
+    },
   },
   { timestamps: true },
 );
@@ -157,102 +322,231 @@ const userSchema = new mongoose.Schema(
 const User = mongoose.model("User", userSchema);
 
 async function seedMongo() {
-  const meditationCount = await Meditation.countDocuments();
-  if (meditationCount === 0) {
-    await Meditation.insertMany([
-      {
-        title: "Morning Mindfulness",
-        duration: 15,
-        level: "Beginner",
-        category: "Mindfulness",
-        description: "Start your day with clarity and peace.",
-        status: "Active",
-      },
-      {
-        title: "Deep Sleep Meditation",
-        duration: 30,
-        level: "Intermediate",
-        category: "Sleep",
-        description: "Relax and prepare for restful sleep.",
-        status: "Active",
-      },
-      {
-        title: "Stress Relief Session",
-        duration: 20,
-        level: "Beginner",
-        category: "Stress",
-        description: "Release tension and find inner calm.",
-        status: "Draft",
-      },
-    ]);
+  // Skip seeding if MongoDB not connected
+  if (!mongoConnected) {
+    console.log("⏭️  Skipping MongoDB seed (using local database)");
+    return;
   }
+
+  // Seed default admin user
+  const adminEmail = "admin@nirvaha.com";
+  const adminExists = await User.findOne({ email: adminEmail });
+
+  if (!adminExists) {
+    const adminPassword = "N1rv@h@Adm!n#2025@Secure"; // Strong default password
+    const hashedPassword = await bcrypt.hash(adminPassword, 12); // Higher salt rounds for security
+
+    const adminUser = new User({
+      id: uuidv4(),
+      name: "Nirvaha Administrator",
+      email: adminEmail,
+      password: hashedPassword,
+      role: "admin",
+      profile: {
+        mobile: "+1-ADMIN-001",
+        age: "",
+        gender: "Not Specified",
+        address: "Nirvaha Headquarters",
+        education: "Administrator",
+        healthCondition: "Not Applicable",
+      },
+    });
+
+    await adminUser.save();
+    console.log("✓ Default admin user created successfully");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("📧 ADMIN CREDENTIALS:");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log(`Email:    ${adminEmail}`);
+    console.log(`Password: ${adminPassword}`);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("⚠️  IMPORTANT: Change this password immediately!");
+    console.log("⚠️  This is a TEMPORARY credential for development.");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  }
+
+  const meditationCount = await Meditation.countDocuments();
+  // Sample meditation data removed - admin panel starts empty
 
   const soundCount = await Sound.countDocuments();
-  if (soundCount === 0) {
-    await Sound.insertMany([
-      {
-        title: "Tibetan Singing Bowls",
-        artist: "Sacred Sounds Collective",
-        frequency: "432 Hz",
-        duration: 15,
-        category: "Bowl Therapy",
-        description: "Ancient healing vibrations from the Himalayas.",
-        status: "Active",
-        mood: ["Calm", "Healing", "Relaxation"],
-      },
-      {
-        title: "Ocean Waves & Rain",
-        artist: "Nature Symphony",
-        frequency: "528 Hz",
-        duration: 20,
-        category: "Nature Sounds",
-        description: "Soothing symphony of ocean waves and gentle rainfall.",
-        status: "Active",
-        mood: ["Peaceful", "Natural", "Meditative"],
-      },
-      {
-        title: "Theta Binaural Beats",
-        artist: "NeuroSound Lab",
-        frequency: "639 Hz",
-        duration: 30,
-        category: "Binaural",
-        description: "Frequencies for deep meditation and clarity.",
-        status: "Active",
-        mood: ["Focus", "Calm"],
-      },
-    ]);
-  }
+  // Sample sound data removed - admin panel starts empty
 }
-const app = express();
-app.set("trust proxy", 1);
-const allowedOrigins = [
-  "http://localhost:3000",
-  "https://nfrontend-five.vercel.app",
-];
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin) {
-        return callback(null, true);
-      }
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"));
-    },
-    credentials: true,
-  }),
-);
+// Socket.IO connection handling
+const connectedClients = new Map();
+
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id);
+
+  socket.on("register", (data) => {
+    connectedClients.set(socket.id, data);
+    console.log(`${data.role || "user"} registered:`, data.userId);
+  });
+
+  socket.on("disconnect", () => {
+    const client = connectedClients.get(socket.id);
+    if (client) {
+      console.log(`${client.role || "user"} disconnected:`, client.userId);
+      connectedClients.delete(socket.id);
+    }
+  });
+});
+
+// Configure app middleware - Complete CORS Access
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// Make io accessible to routes
+app.set("io", io);
+
 app.use("/uploads", express.static(UPLOADS_DIR));
-app.get("/", (req, res) => {
-  res.json({ message: "Nirvaha backend is running 🚀" });
+
+// ============================================
+// AUTHENTICATION ROUTES
+// ============================================
+const JWT_SECRET =
+  process.env.JWT_SECRET || "nirvaha-secret-key-please-change-in-production";
+
+// Register new user
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+
+    // Validation
+    if (!name || !email || !password) {
+      return res
+        .status(400)
+        .json({ error: "Name, email, and password are required" });
+    }
+
+    if (password.length < 6) {
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 6 characters long" });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res
+        .status(400)
+        .json({ error: "User with this email already exists" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create new user
+    const newUser = new User({
+      id: uuidv4(),
+      name,
+      email: email.toLowerCase(),
+      password: hashedPassword,
+      role: role || "user",
+      profile: {
+        mobile: "",
+        age: "",
+        gender: "",
+        address: "",
+        education: "",
+        healthCondition: "",
+      },
+    });
+
+    await newUser.save();
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: newUser.id, email: newUser.email, role: newUser.role },
+      JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    // Return user data (without password)
+    res.status(201).json({
+      message: "User registered successfully",
+      token,
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+        profile: newUser.profile,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Server error during registration" });
+  }
 });
 
-app.get("/health", (req, res) => {
-  res.json({ status: "OK" });
+// Login user
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validation
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+
+    let user;
+
+    // Use local database if MongoDB not available
+    if (!mongoConnected) {
+      user = localDB.users.find((u) => u.email === email.toLowerCase());
+      if (!user) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      // Verify password
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+    } else {
+      // Use MongoDB database
+      user = await User.findOne({ email: email.toLowerCase() });
+      if (!user) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+
+      // Verify password
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    // Return user data (without password)
+    res.status(200).json({
+      message: "Login successful",
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        profile: user.profile,
+      },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Server error during login" });
+  }
 });
+
+// ============================================
+// END AUTHENTICATION ROUTES
+// ============================================
 
 app.post("/api/upload", upload.single("file"), (req, res) => {
   try {
@@ -260,7 +554,7 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+    const fileUrl = `/uploads/${req.file.filename}`;
     res.json({
       success: true,
       url: fileUrl,
@@ -274,6 +568,210 @@ app.post("/api/upload", upload.single("file"), (req, res) => {
     res
       .status(500)
       .json({ error: "File upload failed", message: error.message });
+  }
+});
+
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true });
+});
+app.get("/", (req, res) => {
+  res.json({ message: "Nirvaha backend is running 🚀" });
+});
+
+function parseRangeDays(range) {
+  switch (range) {
+    case "30d":
+      return 30;
+    case "90d":
+      return 90;
+    case "1y":
+      return 365;
+    case "7d":
+    default:
+      return 7;
+  }
+}
+
+function buildDateBuckets(start, end) {
+  const buckets = [];
+  const cursor = new Date(start);
+  cursor.setHours(0, 0, 0, 0);
+  const endDate = new Date(end);
+  endDate.setHours(0, 0, 0, 0);
+  while (cursor <= endDate) {
+    buckets.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return buckets;
+}
+
+function toDateKey(date) {
+  return date.toISOString().split("T")[0];
+}
+
+function getItemAmount(item) {
+  const data = item?.data || {};
+  const candidates = [data.price, data.amount, data.total, data.cost];
+  for (const value of candidates) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number.parseFloat(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
+app.get("/api/analytics", async (req, res) => {
+  try {
+    const range = typeof req.query.range === "string" ? req.query.range : "7d";
+    const days = parseRangeDays(range);
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (days - 1));
+
+    const buckets = buildDateBuckets(start, end);
+    const bucketKeys = buckets.map(toDateKey);
+
+    let usersInRange = [];
+    let baseUserCount = 0;
+
+    if (!mongoConnected) {
+      const users = localDB.users.map((user) => ({
+        createdAt: user.createdAt ? new Date(user.createdAt) : new Date(),
+      }));
+      baseUserCount = users.filter((u) => u.createdAt < start).length;
+      usersInRange = users.filter(
+        (u) => u.createdAt >= start && u.createdAt <= end,
+      );
+    } else {
+      baseUserCount = await User.countDocuments({ createdAt: { $lt: start } });
+      usersInRange = await User.find(
+        { createdAt: { $gte: start, $lte: end } },
+        { createdAt: 1 },
+      ).lean();
+    }
+
+    const userCounts = usersInRange.reduce((acc, item) => {
+      const key = toDateKey(new Date(item.createdAt));
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    let cumulative = baseUserCount;
+    const userGrowth = bucketKeys.map((key) => {
+      cumulative += userCounts[key] || 0;
+      return { date: key, users: cumulative };
+    });
+
+    let requestsInRange = [];
+    let totalBookings = 0;
+
+    if (!mongoConnected) {
+      totalBookings = localDB.marketplaceRequests.length;
+      requestsInRange = localDB.marketplaceRequests
+        .map((request) => ({
+          createdAt: request.createdAt
+            ? new Date(request.createdAt)
+            : new Date(),
+        }))
+        .filter(
+          (request) => request.createdAt >= start && request.createdAt <= end,
+        );
+    } else {
+      totalBookings = await MarketplaceRequest.countDocuments();
+      requestsInRange = await MarketplaceRequest.find(
+        { createdAt: { $gte: start, $lte: end } },
+        { createdAt: 1 },
+      ).lean();
+    }
+
+    const bookingCounts = requestsInRange.reduce((acc, item) => {
+      const key = toDateKey(new Date(item.createdAt));
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    const bookings = bucketKeys.map((key) => ({
+      date: key,
+      bookings: bookingCounts[key] || 0,
+    }));
+
+    const monthStart = new Date(end.getFullYear(), end.getMonth(), 1);
+    let itemsForRange = [];
+    let itemsForMonth = [];
+
+    if (!mongoConnected) {
+      const items = localDB.marketplaceItems || [];
+      itemsForRange = items.filter((item) => {
+        const date = new Date(item.approvedAt || item.createdAt || Date.now());
+        return date >= start && date <= end;
+      });
+      itemsForMonth = items.filter((item) => {
+        const date = new Date(item.approvedAt || item.createdAt || Date.now());
+        return date >= monthStart && date <= end;
+      });
+    } else {
+      itemsForRange = await MarketplaceItem.find(
+        {
+          $or: [
+            { approvedAt: { $gte: start, $lte: end } },
+            { createdAt: { $gte: start, $lte: end } },
+          ],
+        },
+        { type: 1, data: 1, approvedAt: 1, createdAt: 1 },
+      ).lean();
+      itemsForMonth = await MarketplaceItem.find(
+        {
+          $or: [
+            { approvedAt: { $gte: monthStart, $lte: end } },
+            { createdAt: { $gte: monthStart, $lte: end } },
+          ],
+        },
+        { type: 1, data: 1, approvedAt: 1, createdAt: 1 },
+      ).lean();
+    }
+
+    const revenueByType = itemsForRange.reduce((acc, item) => {
+      const type = item.type || "other";
+      acc[type] = (acc[type] || 0) + getItemAmount(item);
+      return acc;
+    }, {});
+
+    const revenueBreakdown = Object.entries(revenueByType).map(
+      ([type, value]) => ({
+        name: type
+          .replace(/(^|\s|_)([a-z])/g, (match) => match.toUpperCase())
+          .replace(/_/g, " "),
+        value,
+      }),
+    );
+
+    const revenueMTD = itemsForMonth.reduce(
+      (sum, item) => sum + getItemAmount(item),
+      0,
+    );
+
+    const activeSessions = Array.from(connectedClients.values()).filter(
+      (client) => client?.role === "user",
+    ).length;
+
+    res.json({
+      range,
+      userGrowth,
+      bookings,
+      revenueBreakdown,
+      metrics: {
+        totalUsers: mongoConnected
+          ? await User.countDocuments()
+          : localDB.users.length,
+        activeSessions,
+        totalBookings,
+        revenueMTD,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -423,6 +921,17 @@ app.post("/api/companion-applications", async (req, res) => {
     submittedAt: new Date(),
   });
 
+  // Emit real-time event for admin
+  const io = req.app.get("io");
+  io.emit("new-companion-request", {
+    id: application.id,
+    fullName: application.fullName,
+    email: application.email,
+    title: application.title,
+    status: application.status,
+    submittedAt: application.submittedAt,
+  });
+
   res.status(201).json({
     id: application.id,
     status: application.status,
@@ -512,6 +1021,15 @@ app.patch("/api/companion-applications/:id/status", async (req, res) => {
     return res.status(404).json({ error: "application not found" });
   }
 
+  // Emit real-time status update
+  const io = req.app.get("io");
+  io.emit("request-status-updated", {
+    id: updated.id,
+    status: updated.status,
+    fullName: updated.fullName,
+    updatedAt: updated.updatedAt,
+  });
+
   res.json(toAdminCompanion(updated));
 });
 
@@ -535,23 +1053,32 @@ app.get("/api/companions", async (req, res) => {
 });
 
 app.get("/api/meditations", async (req, res) => {
-  const meditations = await Meditation.find().sort({ createdAt: -1 }).lean();
-  res.json(
-    meditations.map((item) => ({
-      id: item.id,
-      title: item.title,
-      duration: item.duration,
-      level: item.level || "",
-      category: item.category || "",
-      description: item.description || "",
-      status: item.status || "Draft",
-      thumbnailUrl: item.thumbnailUrl || "",
-      bannerUrl: item.bannerUrl || "",
-      audioUrl: item.audioUrl || "",
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-    })),
-  );
+  try {
+    if (!mongoConnected) {
+      // Return local database meditations
+      return res.json(localDB.meditations || []);
+    }
+
+    const meditations = await Meditation.find().sort({ createdAt: -1 }).lean();
+    res.json(
+      meditations.map((item) => ({
+        id: item.id,
+        title: item.title,
+        duration: item.duration,
+        level: item.level || "",
+        category: item.category || "",
+        description: item.description || "",
+        status: item.status || "Draft",
+        thumbnailUrl: item.thumbnailUrl || "",
+        bannerUrl: item.bannerUrl || "",
+        audioUrl: item.audioUrl || "",
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      })),
+    );
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post("/api/meditations", async (req, res) => {
@@ -659,25 +1186,34 @@ app.delete("/api/meditations/:id", async (req, res) => {
 });
 
 app.get("/api/sounds", async (req, res) => {
-  const sounds = await Sound.find().sort({ createdAt: -1 }).lean();
-  res.json(
-    sounds.map((item) => ({
-      id: item.id,
-      title: item.title,
-      artist: item.artist || "",
-      frequency: item.frequency || "",
-      duration: item.duration,
-      category: item.category || "",
-      description: item.description || "",
-      status: item.status || "Draft",
-      thumbnailUrl: item.thumbnailUrl || "",
-      bannerUrl: item.bannerUrl || "",
-      audioUrl: item.audioUrl || "",
-      mood: Array.isArray(item.mood) ? item.mood : [],
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-    })),
-  );
+  try {
+    if (!mongoConnected) {
+      // Return local database sounds
+      return res.json(localDB.sounds || []);
+    }
+
+    const sounds = await Sound.find().sort({ createdAt: -1 }).lean();
+    res.json(
+      sounds.map((item) => ({
+        id: item.id,
+        title: item.title,
+        artist: item.artist || "",
+        frequency: item.frequency || "",
+        duration: item.duration,
+        category: item.category || "",
+        description: item.description || "",
+        status: item.status || "Draft",
+        thumbnailUrl: item.thumbnailUrl || "",
+        bannerUrl: item.bannerUrl || "",
+        audioUrl: item.audioUrl || "",
+        mood: Array.isArray(item.mood) ? item.mood : [],
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      })),
+    );
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post("/api/sounds", async (req, res) => {
@@ -796,130 +1332,482 @@ app.delete("/api/sounds/:id", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ============================================
-// Authentication Routes
-// ============================================
-
-// POST /api/auth/register
-app.post("/api/auth/register", async (req, res) => {
+// Admin endpoint to clear all data (for development)
+app.post("/api/admin/clear-data", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
-
-    // Validate required fields
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide name, email, and password",
+    if (!mongoConnected) {
+      // Clear local database
+      localDB.meditations = [];
+      localDB.sounds = [];
+      console.log("✓ Local database cleared");
+      return res.json({
+        message: "All data cleared successfully",
+        dataCleared: true,
       });
     }
 
-    // Check if user already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: "User already exists with this email",
-      });
-    }
+    // Clear MongoDB collections
+    await Meditation.deleteMany({});
+    await Sound.deleteMany({});
+    console.log("✓ MongoDB collections cleared");
 
-    // Hash password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Create new user
-    const user = await User.create({
-      name,
-      email: email.toLowerCase(),
-      password: hashedPassword,
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: "User registered successfully",
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-      },
-    });
+    res.json({ message: "All data cleared successfully", dataCleared: true });
   } catch (error) {
-    console.error("Registration error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error during registration",
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// POST /api/auth/login
-app.post("/api/auth/login", async (req, res) => {
+// ========== CONTENT MANAGEMENT API ==========
+
+// Get all content (public)
+app.get("/api/content", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { section } = req.query;
+    const filter = section ? { section } : {};
+    const content = await Content.find(filter).sort({ section: 1, key: 1 });
 
-    // Validate required fields
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide email and password",
-      });
+    const formatted = content.reduce((acc, item) => {
+      acc[item.key] = {
+        value: item.value,
+        type: item.type,
+        section: item.section,
+        updatedAt: item.updatedAt,
+      };
+      return acc;
+    }, {});
+
+    res.json(formatted);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get content by key (public)
+app.get("/api/content/:key", async (req, res) => {
+  try {
+    const content = await Content.findOne({ key: req.params.key });
+    if (!content) {
+      return res.status(404).json({ error: "Content not found" });
     }
+    res.json(content);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-    // Find user by email
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid credentials",
-      });
-    }
+// Get all content items for admin
+app.get("/api/content-admin/all", async (req, res) => {
+  try {
+    const content = await Content.find().sort({ section: 1, key: 1 });
+    res.json(content);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-    // Compare password
-    const isValidPassword = await bcrypt.compare(password, user.password);
-    if (!isValidPassword) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid credentials",
-      });
-    }
+// Create or update content (admin)
+app.put("/api/content/:key", async (req, res) => {
+  try {
+    const { value, type, section, description } = req.body;
 
-    // Generate JWT token
-    const jwtSecret =
-      process.env.JWT_SECRET || "fallback-secret-change-in-production";
-    const token = jwt.sign(
+    const content = await Content.findOneAndUpdate(
+      { key: req.params.key },
       {
-        userId: user._id,
-        email: user.email,
+        value,
+        type: type || "text",
+        section: section || "general",
+        description,
       },
-      jwtSecret,
-      { expiresIn: "1d" },
+      { new: true, upsert: true },
     );
 
-    return res.status(200).json({
-      success: true,
-      message: "Login successful",
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-      },
+    // Emit real-time update
+    const io = req.app.get("io");
+    io.emit("content-updated", {
+      key: content.key,
+      value: content.value,
+      type: content.type,
+      section: content.section,
+      updatedAt: content.updatedAt,
     });
+
+    res.json(content);
   } catch (error) {
-    console.error("Login error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Server error during login",
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Upload image content
+app.post("/api/content/upload", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const { key, section, description } = req.body;
+    const imageUrl = `/uploads/${req.file.filename}`;
+
+    const content = await Content.findOneAndUpdate(
+      { key },
+      {
+        value: imageUrl,
+        type: "image",
+        section: section || "general",
+        description,
+      },
+      { new: true, upsert: true },
+    );
+
+    // Emit real-time update
+    const io = req.app.get("io");
+    io.emit("content-updated", {
+      key: content.key,
+      value: content.value,
+      type: content.type,
+      section: content.section,
+      updatedAt: content.updatedAt,
     });
+
+    res.json(content);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete content
+app.delete("/api/content/:key", async (req, res) => {
+  try {
+    const content = await Content.findOneAndDelete({ key: req.params.key });
+
+    if (!content) {
+      return res.status(404).json({ error: "Content not found" });
+    }
+
+    // Emit real-time update
+    const io = req.app.get("io");
+    io.emit("content-deleted", { key: req.params.key });
+
+    res.json({ message: "Content deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== MARKETPLACE ENDPOINTS ==========
+
+// GET all marketplace requests (admin only)
+app.get("/api/marketplace/requests", async (req, res) => {
+  try {
+    if (!mongoConnected) {
+      const sorted = [...localDB.marketplaceRequests].sort(
+        (a, b) => (b.createdAt || 0) - (a.createdAt || 0),
+      );
+      return res.json(sorted);
+    }
+
+    const requests = await MarketplaceRequest.find().sort({ createdAt: -1 });
+    return res.json(requests);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET single marketplace request
+app.get("/api/marketplace/requests/:id", async (req, res) => {
+  try {
+    if (!mongoConnected) {
+      const request = localDB.marketplaceRequests.find(
+        (item) => item.id === req.params.id,
+      );
+      if (!request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+      return res.json(request);
+    }
+
+    const request = await MarketplaceRequest.findOne({ id: req.params.id });
+    if (!request) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+    return res.json(request);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST new marketplace request
+app.post("/api/marketplace/requests", async (req, res) => {
+  try {
+    const { type, data } = req.body;
+
+    if (!type || !data) {
+      return res.status(400).json({ error: "Type and data are required" });
+    }
+
+    if (!mongoConnected) {
+      const request = {
+        id: uuidv4(),
+        type,
+        data,
+        status: "pending",
+        userId: req.body.userId || "",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      localDB.marketplaceRequests.unshift(request);
+
+      const io = req.app.get("io");
+      io.emit("marketplace-new-request", request);
+
+      return res.status(201).json(request);
+    }
+
+    const request = new MarketplaceRequest({
+      type,
+      data,
+      status: "pending",
+      userId: req.body.userId || "",
+    });
+
+    await request.save();
+
+    // Emit real-time update to admin
+    const io = req.app.get("io");
+    io.emit("marketplace-new-request", request);
+
+    return res.status(201).json(request);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT approve marketplace request (admin only)
+app.put("/api/marketplace/requests/:id/approve", async (req, res) => {
+  try {
+    if (!mongoConnected) {
+      const requestIndex = localDB.marketplaceRequests.findIndex(
+        (item) => item.id === req.params.id,
+      );
+      if (requestIndex === -1) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      const approvedAt = new Date();
+      const approvedBy = req.body.approvedBy || "admin";
+
+      localDB.marketplaceRequests[requestIndex] = {
+        ...localDB.marketplaceRequests[requestIndex],
+        status: "approved",
+        approvedAt,
+        approvedBy,
+        updatedAt: Date.now(),
+      };
+
+      const existingItem = localDB.marketplaceItems.find(
+        (item) => item.requestId === req.params.id,
+      );
+
+      if (!existingItem) {
+        const item = {
+          id: uuidv4(),
+          requestId: req.params.id,
+          type: localDB.marketplaceRequests[requestIndex].type,
+          status: "active",
+          data: localDB.marketplaceRequests[requestIndex].data,
+          approvedAt,
+          approvedBy,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        localDB.marketplaceItems.unshift(item);
+      }
+
+      const io = req.app.get("io");
+      io.emit(
+        "marketplace-request-approved",
+        localDB.marketplaceRequests[requestIndex],
+      );
+      io.emit("marketplace-item-created", { requestId: req.params.id });
+
+      return res.json(localDB.marketplaceRequests[requestIndex]);
+    }
+
+    const request = await MarketplaceRequest.findOneAndUpdate(
+      { id: req.params.id },
+      {
+        status: "approved",
+        approvedAt: new Date(),
+        approvedBy: req.body.approvedBy || "admin",
+      },
+      { new: true },
+    );
+
+    if (!request) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    const existingItem = await MarketplaceItem.findOne({
+      requestId: request.id,
+    });
+    if (!existingItem) {
+      const item = new MarketplaceItem({
+        requestId: request.id,
+        type: request.type,
+        status: "active",
+        data: request.data,
+        approvedAt: request.approvedAt || new Date(),
+        approvedBy: request.approvedBy || "admin",
+      });
+      await item.save();
+    }
+
+    // Emit real-time update
+    const io = req.app.get("io");
+    io.emit("marketplace-request-approved", request);
+    io.emit("marketplace-item-created", { requestId: request.id });
+
+    return res.json(request);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE marketplace request
+app.delete("/api/marketplace/requests/:id", async (req, res) => {
+  try {
+    if (!mongoConnected) {
+      const requestIndex = localDB.marketplaceRequests.findIndex(
+        (item) => item.id === req.params.id,
+      );
+      if (requestIndex === -1) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      localDB.marketplaceRequests.splice(requestIndex, 1);
+
+      const io = req.app.get("io");
+      io.emit("marketplace-request-deleted", { id: req.params.id });
+
+      return res.json({ message: "Request deleted successfully" });
+    }
+
+    const request = await MarketplaceRequest.findOneAndDelete({
+      id: req.params.id,
+    });
+
+    if (!request) {
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    // Emit real-time update
+    const io = req.app.get("io");
+    io.emit("marketplace-request-deleted", { id: req.params.id });
+
+    return res.json({ message: "Request deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET approved marketplace items for user dashboard
+app.get("/api/marketplace/items", async (req, res) => {
+  try {
+    const status = req.query.status || "active";
+
+    if (!mongoConnected) {
+      const items = localDB.marketplaceItems.filter(
+        (item) => item.status === status,
+      );
+      return res.json(items);
+    }
+
+    const items = await MarketplaceItem.find({ status }).sort({
+      createdAt: -1,
+    });
+    return res.json(items);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT complete marketplace item (removes from user dashboard)
+app.put("/api/marketplace/items/:id/complete", async (req, res) => {
+  try {
+    if (!mongoConnected) {
+      const itemIndex = localDB.marketplaceItems.findIndex(
+        (item) => item.id === req.params.id,
+      );
+      if (itemIndex === -1) {
+        return res.status(404).json({ error: "Item not found" });
+      }
+
+      localDB.marketplaceItems[itemIndex] = {
+        ...localDB.marketplaceItems[itemIndex],
+        status: "completed",
+        completedAt: new Date(),
+        completedBy: req.body.completedBy || "admin",
+        updatedAt: Date.now(),
+      };
+
+      const io = req.app.get("io");
+      io.emit("marketplace-item-completed", { id: req.params.id });
+
+      return res.json(localDB.marketplaceItems[itemIndex]);
+    }
+
+    const item = await MarketplaceItem.findOneAndUpdate(
+      { id: req.params.id },
+      {
+        status: "completed",
+        completedAt: new Date(),
+        completedBy: req.body.completedBy || "admin",
+      },
+      { new: true },
+    );
+
+    if (!item) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    const io = req.app.get("io");
+    io.emit("marketplace-item-completed", { id: req.params.id });
+
+    return res.json(item);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
 async function startServer() {
   await connectMongo();
+  await initLocalAdminUser();
   await seedMongo();
 
-  app.listen(PORT, () => {
-    console.log(`Nirvaha backend running on port ${PORT}`);
-  });
+  // Only start server if not in serverless environment (Vercel)
+  if (process.env.VERCEL !== "1") {
+    server.listen(PORT, () => {
+      console.log(`Nirvaha backend running on port ${PORT}`);
+      console.log(`Socket.IO enabled`);
+      if (!mongoConnected) {
+        console.log("\n⚠️  DEVELOPMENT MODE: Using local in-memory database");
+        console.log("📧 Admin Login: admin@nirvaha.com");
+        console.log("🔐 Password: N1rv@h@Adm!n#2025@Secure\n");
+      }
+    });
+  }
 }
 
-startServer();
+// Initialize for serverless or traditional server
+if (process.env.VERCEL === "1") {
+  // For Vercel serverless, initialize immediately
+  connectMongo()
+    .then(() => initLocalAdminUser())
+    .then(() => seedMongo())
+    .catch((err) => console.error("Initialization error:", err));
+} else {
+  // For traditional server, use startServer
+  startServer();
+}
+
+// Export for Vercel serverless
+module.exports = app;
